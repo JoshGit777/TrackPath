@@ -12,4 +12,11 @@ local NewPath = TrackPath.create(game.Workspace:WaitForChild("bigboibob"))
 
 local SmolBoiBob = workspace:WaitForChild("smolboibob")
 
-NewPath:Run(SmolBoiBob)
+game.Workspace:GetAttributeChangedSignal("PathActive"):Connect(function()
+    local Value = game.Workspace:GetAttribute("PathActive")
+    if Value then
+        NewPath:Run(SmolBoiBob)
+    else
+        NewPath:End()
+    end
+end)

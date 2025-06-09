@@ -33,10 +33,11 @@ export type TrackPath = {
 
 	Move: (self: TrackPath, Position: Vector3) -> nil,
 	ComputeWaypoints: (self: TrackPath, Destination: Vector3) -> nil,
-	PathTrack: (self: TrackPath, Destination: Vector3) -> nil,
 	DirectMove: (self: TrackPath, Destination: Model | Vector3) -> nil,
 	Pathfind: (self: TrackPath, Destination: Model | Vector3) -> nil,
 	Run: (self: TrackPath, Destination: Vector3 | Model) -> nil,
+    End: (self:TrackPath) -> nil,
+    Destroy: (self:TrackPath) -> nil
 }
 
 function TrackPath.create(Model, MoveFunction: ((self: TrackPath, Position: Vector3) -> nil)?): TrackPath
@@ -87,11 +88,11 @@ function TrackPath.SetAgentParameters(self: TrackPath, AgentParameters: {})
 end
 
 function TrackPath.ComputeWaypoints(self: TrackPath, Destination: Vector3)
-	self.WaypointNumber = 2
 	task.spawn(function()
 		if not self.IsComputing then
 			self.IsComputing = true
 			self.Path:ComputeAsync(self.Primary.Position, Destination)
+			self.WaypointNumber = math.min(2, #self.Path:GetWaypoints())
 			self.IsComputing = false
 		end
 	end)
@@ -103,16 +104,6 @@ function TrackPath.Move(self: TrackPath, Position)
 			self.Humanoid:MoveTo(Position)
 		else
 			self.MoveFunction(self, Position)
-		end
-	end
-end
-
-function TrackPath.PathTrack(self: TrackPath)
-	if self.Path.Status == Enum.PathStatus.Success then
-		local Waypoint = self.Path:GetWaypoints()[self.WaypointNumber]
-
-		if Waypoint then
-			self.PathPosition = Waypoint.Position
 		end
 	end
 end
@@ -132,11 +123,7 @@ function TrackPath.Pathfind(self: TrackPath, Destination: Vector3 | Model)
 		DestinationPosition = Primary.Position
 	end
 
-	self:ComputeWaypoints(DestinationPosition)
-	self:PathTrack(DestinationPosition)
-
 	self.PathUpdateConnection = RunService.Heartbeat:Connect(function()
-		print(self.WaypointNumber)
 
 		if self.DirectConnection then
 			self.DirectConnection:Disconnect()
@@ -152,7 +139,15 @@ function TrackPath.Pathfind(self: TrackPath, Destination: Vector3 | Model)
 			DestinationPosition = Primary.Position
 		end
 
-		self:PathTrack(DestinationPosition)
+		if self.Path.Status == Enum.PathStatus.Success then
+
+            local WaypointNumber = math.min(self.WaypointNumber + 1, #self.Path:GetWaypoints())
+			local Waypoint = self.Path:GetWaypoints()[WaypointNumber]
+
+			if Waypoint then
+				self.PathPosition = Waypoint.Position
+			end
+		end
 
 		self:Move(self.PathPosition)
 	end)
@@ -226,8 +221,6 @@ function TrackPath.Run(self: TrackPath, Destination: Vector3 | Model)
 					self.PathUpdateConnection:Disconnect()
 				end
 
-				print("direct")
-
 				self.Mode = "Direct"
 				self:DirectMove(Destination)
 			end
@@ -237,14 +230,24 @@ function TrackPath.Run(self: TrackPath, Destination: Vector3 | Model)
 					self.DirectConnection:Disconnect()
 				end
 
-				print("path")
-
 				self:Move(self.Primary.Position)
 				self.Mode = "Path"
 				self:Pathfind(Destination)
 			end
 		end
 	end)
+end
+
+function TrackPath.End(self:TrackPath)
+    self.UpdateConnection:Disconnect()
+    if self.DirectConnection then
+        self.DirectConnection:Disconnect()
+    end
+
+    if self.PathUpdateConnection then
+        self.PathUpdateConnection:Disconnect()
+        self.PathfindConnection:Disconnect()
+    end
 end
 
 return TrackPath
