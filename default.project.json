@@ -5,7 +5,11 @@
 
     "ReplicatedStorage": {
       "Shared": {
-        "$path": "src/shared"
+        "$path": "src/shared",
+        "TrackPath": {
+          "$path": "src/init.lua",
+          "$className": "ModuleScript"
+        }
       }
     },
 

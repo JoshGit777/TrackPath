@@ -8,6 +8,8 @@ TrackPath.__index = TrackPath
 
 export type TrackSettings = {
 	ComputationDelay: number,
+	MaximumDirectDistance: number,
+	HeightTolerance: number,
 }
 
 export type TrackPath = {
@@ -16,6 +18,7 @@ export type TrackPath = {
 	Primary: BasePart,
 	Humanoid: Humanoid,
 	MoveFunction: (self: TrackPath, Position: Vector3) -> nil,
+	JumpFunction: (self:TrackPath) -> nil,
 	MoveFinishedEvent: BindableEvent,
 	Path: Path,
 	Waypoints: { PathWaypoint },
@@ -30,17 +33,23 @@ export type TrackPath = {
 	LastComputation: number,
 	WaypointNumber: number,
 	IsComputing: boolean,
+	LastWaypoint: PathWaypoint,
+	LastJumpedWaypoint: PathWaypoint,
 
 	Move: (self: TrackPath, Position: Vector3) -> nil,
+	Jump: (self:TrackPath) -> nil,
 	ComputeWaypoints: (self: TrackPath, Destination: Vector3) -> nil,
 	DirectMove: (self: TrackPath, Destination: Model | Vector3) -> nil,
 	Pathfind: (self: TrackPath, Destination: Model | Vector3) -> nil,
 	Run: (self: TrackPath, Destination: Vector3 | Model) -> nil,
     End: (self:TrackPath) -> nil,
-    Destroy: (self:TrackPath) -> nil
+    Destroy: (self:TrackPath) -> nil,
+
+	_ReachedRef: BindableEvent,
+	Reached: RBXScriptSignal,
 }
 
-function TrackPath.create(Model, MoveFunction: ((self: TrackPath, Position: Vector3) -> nil)?): TrackPath
+function TrackPath.create(Model, MoveFunction: ((self: TrackPath, Position: Vector3) -> nil)?, JumpFunction: ((self:TrackPath) -> nil)?): TrackPath
 	local self: TrackPath = setmetatable({} :: any, TrackPath)
 	self.Model = Model
 	self.Primary = Model.PrimaryPart
@@ -53,6 +62,9 @@ function TrackPath.create(Model, MoveFunction: ((self: TrackPath, Position: Vect
 
 	if not self.Humanoid then
 		self.MoveFunction = MoveFunction :: (self: TrackPath, Position: Vector3) -> nil
+
+		self.JumpFunction = JumpFunction :: (self:TrackPath) -> nil
+
 		self.MoveFinishedEvent = Instance.new("BindableEvent")
 	end
 
@@ -63,17 +75,19 @@ function TrackPath.create(Model, MoveFunction: ((self: TrackPath, Position: Vect
 	else
 		self.MoveCompleteConnection = self.MoveFinishedEvent.Event
 	end
+	
+	self._ReachedRef = Instance.new("BindableEvent")
+
+	self.Reached = self._ReachedRef.Event
 
 	self.TrackSettings = {
 		ComputationDelay = 0.25,
+		MaximumDirectDistance = 100,
+		HeightTolerance = 4,
 	}
 
 	self.LastComputation = 0
 	self.WaypointNumber = 2
-
-	self.Path.Blocked:Connect(function()
-		print("blocked")
-	end)
 
 	return self
 end
@@ -108,6 +122,14 @@ function TrackPath.Move(self: TrackPath, Position)
 	end
 end
 
+function TrackPath.Jump(self:TrackPath)
+	if self.Humanoid then
+		self.Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+	else
+		self.JumpFunction(self)
+	end
+end
+
 function TrackPath.Pathfind(self: TrackPath, Destination: Vector3 | Model)
 	local DestinationPosition: Vector3
 	local DestinationCanMove
@@ -129,6 +151,8 @@ function TrackPath.Pathfind(self: TrackPath, Destination: Vector3 | Model)
 			self.DirectConnection:Disconnect()
 		end
 
+		local Waypoint: PathWaypoint
+
 		if tick() - self.LastComputation > self.TrackSettings["ComputationDelay"] then
 			self:ComputeWaypoints(DestinationPosition)
 			self.LastComputation = tick()
@@ -142,7 +166,7 @@ function TrackPath.Pathfind(self: TrackPath, Destination: Vector3 | Model)
 		if self.Path.Status == Enum.PathStatus.Success then
 
             local WaypointNumber = math.min(self.WaypointNumber + 1, #self.Path:GetWaypoints())
-			local Waypoint = self.Path:GetWaypoints()[WaypointNumber]
+			Waypoint = self.Path:GetWaypoints()[WaypointNumber]
 
 			if Waypoint then
 				self.PathPosition = Waypoint.Position
@@ -150,6 +174,17 @@ function TrackPath.Pathfind(self: TrackPath, Destination: Vector3 | Model)
 		end
 
 		self:Move(self.PathPosition)
+
+		if Waypoint and Waypoint.Action == Enum.PathWaypointAction.Jump then
+			if Waypoint ~= self.LastJumpedWaypoint then
+				self:Jump()
+				self.LastJumpedWaypoint = Waypoint
+			end
+		end
+
+		if Waypoint then
+			self.LastWaypoint = Waypoint
+		end
 	end)
 
 	self.PathfindConnection = self.MoveCompleteConnection:Connect(function()
@@ -190,8 +225,18 @@ function TrackPath.Run(self: TrackPath, Destination: Vector3 | Model)
 
 	self.Mode = ""
 
+	local TrackSettings = self.TrackSettings
+
+	local MaximumDistance = TrackSettings.MaximumDirectDistance
+
 	self.UpdateConnection = RunService.Heartbeat:Connect(function()
+
+		if not self.Primary then
+			self:Destroy()
+		end
+
 		local DestinationPosition: Vector3 = nil
+		local YTolerance = self.TrackSettings.HeightTolerance
 
 		if typeof(Destination) == "Vector3" then
 			DestinationPosition = Destination :: Vector3
@@ -202,18 +247,25 @@ function TrackPath.Run(self: TrackPath, Destination: Vector3 | Model)
 			error("DESTINATION MUST BE EITHER A VECTOR 3 OR A MODEL")
 		end
 
-		local PartDirection = DestinationPosition - self.Primary.Position
-		local Result = Workspace:Raycast(self.Primary.Position, PartDirection, Params)
+		local PartDirection = (DestinationPosition - self.Primary.Position)
+		local Result = Workspace:Blockcast(self.Primary.CFrame, self.Primary.Size, PartDirection, Params)
 
+		local PartDistance = (DestinationPosition - self.Primary.Position).Magnitude
 		local DestinationHit = nil
 
-		if typeof(Destination) == "Instance" and Destination:IsA("Model") then
+		if PartDistance < 2 then
+			self._ReachedRef:Fire()
+		end
+
+		if Result and typeof(Destination) == "Instance" and Destination:IsA("Model") then
 			DestinationHit = Result.Instance and Result.Instance:IsDescendantOf(Destination) or false
 		else
 			DestinationHit = false
 		end
 
-		if Result and (Result.Instance == nil or DestinationHit) then
+		local YDistance = DestinationPosition.Y - self.Primary.Position.Y
+
+		if Result and (Result.Instance == nil or DestinationHit) and PartDistance <= MaximumDistance and YDistance <= YTolerance then
 			if self.Mode == "Path" or self.Mode == "" then
 				if self.PathfindConnection and self.PathUpdateConnection then
 					self.WaypointNumber = 2
@@ -239,7 +291,11 @@ function TrackPath.Run(self: TrackPath, Destination: Vector3 | Model)
 end
 
 function TrackPath.End(self:TrackPath)
-    self.UpdateConnection:Disconnect()
+    
+	if self.UpdateConnection then
+		self.UpdateConnection:Disconnect()
+	end
+	
     if self.DirectConnection then
         self.DirectConnection:Disconnect()
     end
@@ -248,6 +304,20 @@ function TrackPath.End(self:TrackPath)
         self.PathUpdateConnection:Disconnect()
         self.PathfindConnection:Disconnect()
     end
+end
+
+function TrackPath.Destroy(self:TrackPath)
+	self:End()
+	
+	for index, _ in pairs(self) do
+		self[index] = nil
+	end
+
+	setmetatable(self, nil)
+
+	table.freeze(self)
+
+	self = nil :: any
 end
 
 return TrackPath
